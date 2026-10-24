@@ -234,7 +234,7 @@ class SilenceServerService(threading.Thread):
                             if data.decode()[:5] == "$RCAN": # Don't send Silence the magic tricks we do on CAN
                                 continue
                             scooterSocket.send(data)
-                            log.info(f"sent to scooter the data from silence {data}")
+                            log.info(f"sent to scooter the data from silence {data} (IMEI {self.IMEI})")
 
                     #else:
                     #    log.info("no data from silence")
