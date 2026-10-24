@@ -30,8 +30,8 @@ class CommandService:
             # add default "RAW_COMMAND" command
             self.commands_definition[RAW_COMMAND_CODE] = {'timeout': 10, 'retry' : 1, 'command': ''}
 
-            log.debug(f"Subscribing to {TOPIC_COMMAND_RECEIVED} ({self.IMEI})")
-            pub.subscribe(self.command_received, TOPIC_COMMAND_RECEIVED)
+            log.debug(f"Subscribing to {imei_topic(TOPIC_COMMAND_RECEIVED, self.IMEI)}")
+            pub.subscribe(self.command_received, imei_topic(TOPIC_COMMAND_RECEIVED, self.IMEI))
 
             self._running = True
 
@@ -60,13 +60,13 @@ class CommandService:
         # verify command in configuration
         if command not in self.commands_definition:
             log.error(f"Invalid command received: {command}")
-            pub.sendMessage(TOPIC_COMMAND_RESULT, command=command, result="Invalid command")
+            pub.sendMessage(imei_topic(TOPIC_COMMAND_RESULT, self.IMEI), command=command, result="Invalid command")
             return
 
         # verify command already in queue
         if any(item.Code == command for item in list(self.command_queue.queue)):
             log.error(f"Command already in queue: {command}")
-            pub.sendMessage(TOPIC_COMMAND_RESULT, command=command, result="Command already in queue")
+            pub.sendMessage(imei_topic(TOPIC_COMMAND_RESULT, self.IMEI), command=command, result="Command already in queue")
             return
 
         try:
@@ -91,7 +91,7 @@ class CommandService:
                 log.error(f"Command timeout reached: {item.to_json()} ({self.IMEI})")
                 #self.command_queue.task_done()
                 self.command_queue.queue.remove(item)
-                pub.sendMessage(TOPIC_COMMAND_RESULT, command=item.Code, result=f"Command timeout reached, {item.to_json()} ({self.IMEI})")
+                pub.sendMessage(imei_topic(TOPIC_COMMAND_RESULT, self.IMEI), command=item.Code, result=f"Command timeout reached, {item.to_json()} ({self.IMEI})")
 
     def get_next_command(self):
         while not self.command_queue.empty():
@@ -99,7 +99,7 @@ class CommandService:
             if (next_command.checkTimeout()):
                 log.error(f"Command timeout reached: {next_command.to_json()} ({self.IMEI})")
                 self.command_queue.task_done()
-                pub.sendMessage(TOPIC_COMMAND_RESULT, command=next_command.Code, result=f"Command timeout reached, {next_command.to_json()} ({self.IMEI})")
+                pub.sendMessage(imei_topic(TOPIC_COMMAND_RESULT, self.IMEI), command=next_command.Code, result=f"Command timeout reached, {next_command.to_json()} ({self.IMEI})")
 
             return next_command
 
@@ -111,7 +111,7 @@ class CommandService:
     def command_executed(self, command, response):
         log.info(f"Command executed: {command.to_json()} ({self.IMEI})")
         self.command_queue.task_done()
-        pub.sendMessage(TOPIC_COMMAND_RESULT, command=command.Code, result=f"Response <{response.decode()}> from IMEI {self.IMEI}")
+        pub.sendMessage(imei_topic(TOPIC_COMMAND_RESULT, self.IMEI), command=command.Code, result=f"Response <{response.decode()}> from IMEI {self.IMEI}")
 
     def command_failed(self, command):
         log.error(f"Command failed: {command.to_json()} ({self.IMEI})")
@@ -119,7 +119,7 @@ class CommandService:
 
         if (not command.retry()):
             log.error(f"Command retry limit reached: {command.to_json()} ({self.IMEI})")
-            pub.sendMessage(TOPIC_COMMAND_RESULT, command=command.Code, result=f"Command retry limit reached: {command.to_json()} ({self.IMEI})")
+            pub.sendMessage(imei_topic(TOPIC_COMMAND_RESULT, self.IMEI), command=command.Code, result=f"Command retry limit reached: {command.to_json()} ({self.IMEI})")
         else:
             log.info(f"Command retry: {command.to_json()} ({self.IMEI})")
             self.command_queue.put(command)

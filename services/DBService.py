@@ -31,7 +31,7 @@ class DBService:
 
             self.DBcon.commit()
             log.debug(f"Subscribing to {TOPIC_SOCKET} ({self.IMEI})")
-            pub.subscribe(self.receive_from_socket, TOPIC_SOCKET)
+            pub.subscribe(self.receive_from_socket, imei_topic(TOPIC_SOCKET, self.IMEI))
 
         except Exception:
             log.exception("Exception in MQTTService start")

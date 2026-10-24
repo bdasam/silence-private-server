@@ -25,7 +25,9 @@ class SilenceServerService(threading.Thread):
 
         self._stop_event = threading.Event()
 
-        self.serverPORT = configuration["serverPORT"]
+        # serverPORT None = no own listener (single-port mode: SinglePortRouter
+        # accepts the connection and hands it over via handle_client)
+        self.serverPORT = configuration.get("serverPORT")
         self.silenceHOST = configuration["silenceHOST"]
         self.silencePORT = configuration["silencePORT"]
         self.bridgeMode = configuration["bridgeMode"]
@@ -37,8 +39,11 @@ class SilenceServerService(threading.Thread):
         self.ACKresponse = b'\x06'
 
         self.BMScellVoltage_pooling_interval = configuration["BMScellVoltage_pooling_interval"]
+        # The $RCAN poll burst uses S01 CAN IDs; disable it for other vehicles
+        self.extendedCanPolling = configuration.get("extendedCanPolling", True)
 
-        self.parser = MessageParser()
+        self.parser = MessageParser(IMEI)
+        self.dbService = None
 
         if configuration["SaveToDB"]:
             log.info(f"Starting DBService for IMEI: {self.IMEI}")
@@ -54,199 +59,212 @@ class SilenceServerService(threading.Thread):
         if self.dbService:
             self.dbService.stop()
 
-    def run(self):
+        self.commandService.stop()
 
-        def listenerClient(scooterSocket):
-            did_increment_count = False
+    @staticmethod
+    def extract_imei(messages):
+        """IMEI from the $ASTRA;<model>;<IMEI>;... login frame, or ''."""
+        retrievedIMEI = ""
+        for message in messages:
+            if message["protocol"] == "Astra":
+                fields = bytes(message["data"]).decode(errors="replace").split(";")
+                if len(fields) > 2:
+                    retrievedIMEI = fields[2]
+        return retrievedIMEI
 
-            try:
-                # Once connected verify the login
-                if self.bridgeMode:
-                    silenceClientSocket = socket.socket()
+    def handle_client(self, scooterSocket, messages=None):
+        """Serve one vehicle connection. `messages` are the login frames when
+        they were already read (single-port mode)."""
+        did_increment_count = False
 
+        try:
+            # Once connected verify the login
+            if self.bridgeMode:
+                silenceClientSocket = socket.socket()
+
+            if messages is None:
                 messages,crashedFlag = self._telegramReceiver(scooterSocket, 10, 0.2, "A", True)
 
                 if crashedFlag == 1 or len(messages) == 0:
                     raise Exception("crashed socket 1")
 
-                retrievedIMEI = ""
-                for message in messages:
-                    data = message["data"]
-                    protocol = message["protocol"]
-                    if protocol == "Astra":
-                        decodedData = data.decode()
-                        retrievedIMEI = decodedData.split(";")
-                        retrievedIMEI = retrievedIMEI[2]
-                        log.info ("retrieved IMEI: " + retrievedIMEI)
+            retrievedIMEI = self.extract_imei(messages)
+            log.info ("retrieved IMEI: " + retrievedIMEI)
 
-                # Verify if IMEI is correct
-                if retrievedIMEI == self.IMEI:
-                    # Signal any existing thread to exit, then take its slot.
-                    # Prevents "two valid login" deadlock when an old thread is
-                    # blocked on a slow _telegramReceiver and can't observe
-                    # connectionCount > 1 in time.
-                    with self.connectionLock:
-                        if self.connectionCount >= 1:
-                            log.info("new login detected, signaling old thread to exit")
-                            self.newConnectionEvent.set()
-                        self.connectionCount = self.connectionCount + 1
-                        did_increment_count = True
-                    if self.bridgeMode:
-                        log.info("We're in bridge mode, trying to connect to Silence Server")
-                        silenceClientSocket.connect((self.silenceHOST, self.silencePORT))  # Trying to connect to Silence Servers.
-                        log.info("Connected to Silence Server")
+            # Verify if IMEI is correct
+            if retrievedIMEI == self.IMEI:
+                # Signal any existing thread to exit, then take its slot.
+                # Prevents "two valid login" deadlock when an old thread is
+                # blocked on a slow _telegramReceiver and can't observe
+                # connectionCount > 1 in time.
+                with self.connectionLock:
+                    if self.connectionCount >= 1:
+                        log.info("new login detected, signaling old thread to exit")
+                        self.newConnectionEvent.set()
+                    self.connectionCount = self.connectionCount + 1
+                    did_increment_count = True
+                if self.bridgeMode:
+                    log.info("We're in bridge mode, trying to connect to Silence Server")
+                    silenceClientSocket.connect((self.silenceHOST, self.silencePORT))  # Trying to connect to Silence Servers.
+                    log.info("Connected to Silence Server")
 
-                        for message in messages:
-                            data = message["data"]
-                            protocol = message["protocol"]
-                            silenceClientSocket.send(data)
-                        dataFromSilence,crashedFlag = self._telegramReceiver(silenceClientSocket, 10, 0.2, "S")
+                    for message in messages:
+                        data = message["data"]
+                        protocol = message["protocol"]
+                        silenceClientSocket.send(data)
+                    dataFromSilence,crashedFlag = self._telegramReceiver(silenceClientSocket, 10, 0.2, "S")
 
-                        if crashedFlag == 1:
-                            raise Exception("crashed socket")
-
-                        elif len(dataFromSilence) > 0:
-                            for message in dataFromSilence:
-                                data = message["data"]
-                                protocol = message["protocol"]
-                                scooterSocket.send(data)    # Sending message to scooter
-                                log.info("login correct sending ack")
-                        else:
-                            raise Exception("silence didn't confirm login, closing")
-
-                    else:
-                        scooterSocket.send(self.ACKresponse)
-
-                else:           # If IMEI is wrong throw an exception and close everything
-                    log.error("no my IMEI")
-                    raise Exception("Wrong login")
-
-                # Wait for old socket to close. The old thread has been
-                # signaled via newConnectionEvent and should exit promptly.
-                # Generous timeout (30s) covers slow socket closes; if it still
-                # doesn't drop, force the count down to 1 ourselves rather than
-                # crash-looping (which is what caused the historical deadlock).
-                wait_counter = 0
-                while self.connectionCount > 1:
-                    wait_counter += 1
-                    if wait_counter > 300:
-                        log.warning("old thread did not exit in 30s, forcing connectionCount reset")
-                        with self.connectionLock:
-                            self.connectionCount = 1
-                        break
-                    time.sleep(0.1)
-                # We are now the active thread; clear the event for future logins
-                self.newConnectionEvent.clear()
-
-                last_keep_alive_sent = time.time()
-                last_BMS_pooling_time = 0
-                while 1:    # Communication loop with scooter
-                    # See in scooter has data to send
-                    messages,crashedFlag = self._telegramReceiver(scooterSocket, 0.2, 0.2, "A", True)
                     if crashedFlag == 1:
-                        log.error("crash socket on communication from scooter")
-                        raise Exception("crash socket on communication from scooter")
-                    elif len(messages) > 0:
-                        for message in messages:
+                        raise Exception("crashed socket")
+
+                    elif len(dataFromSilence) > 0:
+                        for message in dataFromSilence:
                             data = message["data"]
                             protocol = message["protocol"]
-                            log.info("received status from scooter")
-                            if message["protocol"] == "Z":  #only parse protocol Z messages
-                                self.parser.parse_message_from_scooter_protocol_Z(data)
-                            elif message["protocol"] == "Astra":
-                                self.parser.parse_message_from_scooter_protocol_astra(data)
-                            if self.bridgeMode and len(data) > 1:   #hide response ack to silence
-                                silenceClientSocket.send(data)
-                                log.info("sent to silence")
-                            elif len(data) > 1:     #also don't send an ACK in response to an ACK
-                                scooterSocket.send(self.ACKresponse)
-                                log.info("sent ack to scooter")
-                    #else:
-                    #    log.info("No data from Scooter")
+                            scooterSocket.send(data)    # Sending message to scooter
+                            log.info("login correct sending ack")
+                    else:
+                        raise Exception("silence didn't confirm login, closing")
 
-                    # Checking if we have any command to send to the scooter
-                    while(self.commandService.commands_to_execute()):
-                        command = self.commandService.get_next_command()
-                        log.info(f"command to execute: {command.Code}")
-                        try:
-                            log.info(f"Sending command to scooter: {command.get_command()}")
-                            scooterSocket.send(command.get_command())
-                            log.info(f"sent command to scooter")
-                            self.commandService.command_executed(command, "Ok".encode())
-                        except Exception as e:
-                            log.error(f"Command {command.Code} execution failed: {e}")
-                            self.commandService.command_failed(command)
-                            continue
+                else:
+                    scooterSocket.send(self.ACKresponse)
 
-                    if self.BMScellVoltage_pooling_interval > 0 and time.time() - last_BMS_pooling_time > self.BMScellVoltage_pooling_interval and not self.parser.scooter_off:
-                        scooterSocket.send("$RCAN,185".encode())
-                        scooterSocket.send("$RCAN,186".encode())
-                        scooterSocket.send("$RCAN,187".encode())
-                        scooterSocket.send("$RCAN,188".encode())
-                        # Extended CAN: ECU mode/switches, range, BMS flags
-                        # Small delay between sends to avoid overwhelming the Astra module
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,182".encode())
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,280".encode())
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,300".encode())
-                        # Decoded CAN sensors: BMS current, temperatures, Votol RPM/power/voltage
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,181".encode())
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,189".encode())
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,371".encode())
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,381".encode())
-                        time.sleep(0.05)
-                        scooterSocket.send("$RCAN,391".encode())
-                        last_BMS_pooling_time = time.time()
+            else:           # If IMEI is wrong throw an exception and close everything
+                log.error("no my IMEI")
+                raise Exception("Wrong login")
 
-                    if self.keepAliveInterval > 0 and time.time() - last_keep_alive_sent > self.keepAliveInterval:
-                        scooterSocket.send(self.ACKresponse)
-                        log.info("Keep-Alive: Sent ACK to scooter")
-                        last_keep_alive_sent = time.time()
-
-                    if self.bridgeMode:
-                        # Checking if Silence has to send anything to the scooter
-                        dataFromSilence,crashedFlag = self._telegramReceiver(silenceClientSocket, 0.2, 0.2, "S")
-                        if crashedFlag == 1:
-                            raise Exception("crashed socket")
-
-                        elif len(dataFromSilence) > 0:
-                            for message in dataFromSilence:
-                                data = message["data"]
-                                protocol = message["protocol"]
-                                if data.decode()[:5] == "$RCAN": # Don't send Silence the magic tricks we do on CAN
-                                    continue
-                                scooterSocket.send(data)
-                                log.info(f"sent to scooter the data from silence {data}")
-
-                        #else:
-                        #    log.info("no data from silence")
-
-                    if self.newConnectionEvent.is_set():     # A new login arrived; yield our slot.
-                        raise Exception("new connection detected, closing the old one")
-
-            except Exception:
-                log.exception ("Exception on listener")
-
-                try:
-                    scooterSocket.close()
-                except:
-                    log.error("socket scooter already close")
-
-                try:
-                    silenceClientSocket.close()
-                except:
-                    log.error("socket silence server already close")
-
-                if did_increment_count:
+            # Wait for old socket to close. The old thread has been
+            # signaled via newConnectionEvent and should exit promptly.
+            # Generous timeout (30s) covers slow socket closes; if it still
+            # doesn't drop, force the count down to 1 ourselves rather than
+            # crash-looping (which is what caused the historical deadlock).
+            wait_counter = 0
+            while self.connectionCount > 1:
+                wait_counter += 1
+                if wait_counter > 300:
+                    log.warning("old thread did not exit in 30s, forcing connectionCount reset")
                     with self.connectionLock:
-                        self.connectionCount = max(0, self.connectionCount - 1)
-                log.info("closing thread, connected clients: "+str(self.connectionCount))
+                        self.connectionCount = 1
+                    break
+                time.sleep(0.1)
+            # We are now the active thread; clear the event for future logins
+            self.newConnectionEvent.clear()
+
+            last_keep_alive_sent = time.time()
+            last_BMS_pooling_time = 0
+            while 1:    # Communication loop with scooter
+                # See in scooter has data to send
+                messages,crashedFlag = self._telegramReceiver(scooterSocket, 0.2, 0.2, "A", True)
+                if crashedFlag == 1:
+                    log.error("crash socket on communication from scooter")
+                    raise Exception("crash socket on communication from scooter")
+                elif len(messages) > 0:
+                    for message in messages:
+                        data = message["data"]
+                        protocol = message["protocol"]
+                        log.info("received status from scooter")
+                        if message["protocol"] == "Z":  #only parse protocol Z messages
+                            self.parser.parse_message_from_scooter_protocol_Z(data)
+                        elif message["protocol"] == "Astra":
+                            self.parser.parse_message_from_scooter_protocol_astra(data)
+                        if self.bridgeMode and len(data) > 1:   #hide response ack to silence
+                            silenceClientSocket.send(data)
+                            log.info("sent to silence")
+                        elif len(data) > 1:     #also don't send an ACK in response to an ACK
+                            scooterSocket.send(self.ACKresponse)
+                            log.info("sent ack to scooter")
+                #else:
+                #    log.info("No data from Scooter")
+
+                # Checking if we have any command to send to the scooter
+                while(self.commandService.commands_to_execute()):
+                    command = self.commandService.get_next_command()
+                    log.info(f"command to execute: {command.Code}")
+                    try:
+                        log.info(f"Sending command to scooter: {command.get_command()}")
+                        scooterSocket.send(command.get_command())
+                        log.info(f"sent command to scooter")
+                        self.commandService.command_executed(command, "Ok".encode())
+                    except Exception as e:
+                        log.error(f"Command {command.Code} execution failed: {e}")
+                        self.commandService.command_failed(command)
+                        continue
+
+                if self.extendedCanPolling and self.BMScellVoltage_pooling_interval > 0 and time.time() - last_BMS_pooling_time > self.BMScellVoltage_pooling_interval and not self.parser.scooter_off:
+                    scooterSocket.send("$RCAN,185".encode())
+                    scooterSocket.send("$RCAN,186".encode())
+                    scooterSocket.send("$RCAN,187".encode())
+                    scooterSocket.send("$RCAN,188".encode())
+                    # Extended CAN: ECU mode/switches, range, BMS flags
+                    # Small delay between sends to avoid overwhelming the Astra module
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,182".encode())
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,280".encode())
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,300".encode())
+                    # Decoded CAN sensors: BMS current, temperatures, Votol RPM/power/voltage
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,181".encode())
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,189".encode())
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,371".encode())
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,381".encode())
+                    time.sleep(0.05)
+                    scooterSocket.send("$RCAN,391".encode())
+                    last_BMS_pooling_time = time.time()
+
+                if self.keepAliveInterval > 0 and time.time() - last_keep_alive_sent > self.keepAliveInterval:
+                    scooterSocket.send(self.ACKresponse)
+                    log.info("Keep-Alive: Sent ACK to scooter")
+                    last_keep_alive_sent = time.time()
+
+                if self.bridgeMode:
+                    # Checking if Silence has to send anything to the scooter
+                    dataFromSilence,crashedFlag = self._telegramReceiver(silenceClientSocket, 0.2, 0.2, "S")
+                    if crashedFlag == 1:
+                        raise Exception("crashed socket")
+
+                    elif len(dataFromSilence) > 0:
+                        for message in dataFromSilence:
+                            data = message["data"]
+                            protocol = message["protocol"]
+                            if data.decode()[:5] == "$RCAN": # Don't send Silence the magic tricks we do on CAN
+                                continue
+                            scooterSocket.send(data)
+                            log.info(f"sent to scooter the data from silence {data}")
+
+                    #else:
+                    #    log.info("no data from silence")
+
+                if self.newConnectionEvent.is_set():     # A new login arrived; yield our slot.
+                    raise Exception("new connection detected, closing the old one")
+
+        except Exception:
+            log.exception ("Exception on listener")
+
+            try:
+                scooterSocket.close()
+            except:
+                log.error("socket scooter already close")
+
+            try:
+                silenceClientSocket.close()
+            except:
+                log.error("socket silence server already close")
+
+            if did_increment_count:
+                with self.connectionLock:
+                    self.connectionCount = max(0, self.connectionCount - 1)
+            log.info("closing thread, connected clients: "+str(self.connectionCount))
+
+    def run(self):
+
+        if self.serverPORT is None:
+            log.info(f"no own listener for IMEI {self.IMEI} (single-port mode)")
+            return
 
         #------------------------------------- LISTENING TO INCOMING CONNECTIONS ---------------------------------------
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)   #configure socket
@@ -264,7 +282,7 @@ class SilenceServerService(threading.Thread):
                     try:
                         conn, addr = s.accept()
                         log.info("client "+str(addr)+" connected")
-                        start_new_thread(listenerClient, (conn, ))
+                        start_new_thread(self.handle_client, (conn, ))
                         log.info("client connnected: "+str(self.connectionCount))
                         time.sleep(0.01)
                     except:
@@ -281,7 +299,9 @@ class SilenceServerService(threading.Thread):
         def _messageReceived(messages,data,protocol):
             messages.append({"protocol" : protocol , "data" : data})
             log.info(f"receive data {data}")
-            pub.sendMessage(TOPIC_SOCKET, receiver = receiverName, data=data)
+            imei = getattr(self, "IMEI", None)
+            if imei:
+                pub.sendMessage(imei_topic(TOPIC_SOCKET, imei), receiver = receiverName, data=data)
 
 
         scooterSocket.settimeout(primoTimeout)

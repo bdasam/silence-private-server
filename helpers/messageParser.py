@@ -32,7 +32,10 @@ def _monotonic():
 
 class MessageParser:
 
-    def __init__(self):
+    def __init__(self, imei=None):
+
+        # Per-vehicle status topic (unscoped when used standalone, e.g. tests)
+        self.status_topic = imei_topic(TOPIC_SCOOTER_STATUS, imei) if imei else TOPIC_SCOOTER_STATUS
 
         self.scooter_off = True
         self.off_statuses = [0,1,5]
@@ -259,7 +262,7 @@ class MessageParser:
                             self.parameters[key]["value"] = "None"
 
                 log.debug(f"Message protocol Z parsed: {self.parameters}")
-                pub.sendMessage(TOPIC_SCOOTER_STATUS, scooter_status = self.parameters)
+                pub.sendMessage(self.status_topic, scooter_status = self.parameters)
 
             except Exception:
                 log.exception(f"Exception in handling message protocol Z {data}")
@@ -304,7 +307,7 @@ class MessageParser:
 
                 updated = {k: self.parameters[k] for k in updated_keys if k in self.parameters}
                 log.debug(f"Message protocol astra parsed, publishing {sorted(updated_keys)}")
-                pub.sendMessage(TOPIC_SCOOTER_STATUS, scooter_status = updated)
+                pub.sendMessage(self.status_topic, scooter_status = updated)
 
             except Exception:
                 log.exception(f"Exception in handling message protocol astra {data}")
@@ -382,7 +385,7 @@ class MessageParser:
 
         updated = {k: self.parameters[k] for k in updated_keys if k in self.parameters}
         log.debug(f"Message $STMS parsed, publishing {sorted(updated_keys)}")
-        pub.sendMessage(TOPIC_SCOOTER_STATUS, scooter_status=updated)
+        pub.sendMessage(self.status_topic, scooter_status=updated)
 
     def _parse_extended_can(self, data):
         """Parse extended CAN data from $RCAN responses.

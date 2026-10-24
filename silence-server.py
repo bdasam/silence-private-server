@@ -7,18 +7,22 @@ from helpers.constants import *
 from helpers.logger import setup_logger
 from services.MQTTService import MQTTService
 from services.SilenceServerService import SilenceServerService
+from services.SinglePortRouter import SinglePortRouter
 
 def start_services_for_imei(configuration, imei, index, logger):
     """Start Silence Server and MQTT Service for a given IMEI number."""
     logger.info(f"Logger configured for IMEI: {imei}")
 
-    # Use BasePort and create unique ports for each IMEI
-    port = configuration["TCPServer"]["BasePort"] + index
-    logger.info(f"Using port {port} for IMEI: {imei}")
-
-    # Start Silence Server with individual port
     server_config = configuration["TCPServer"].copy()
-    server_config["serverPORT"] = port  # adding serverPORT
+
+    if server_config.get("singlePort", False):
+        # All IMEIs share BasePort; SinglePortRouter dispatches by login IMEI
+        server_config["serverPORT"] = None
+    else:
+        # Use BasePort and create unique ports for each IMEI
+        port = configuration["TCPServer"]["BasePort"] + index
+        logger.info(f"Using port {port} for IMEI: {imei}")
+        server_config["serverPORT"] = port  # adding serverPORT
 
     server = SilenceServerService(server_config, imei)
     server.start()
@@ -57,6 +61,12 @@ def main():
         for future in futures:
             servers_mqtt_services.append(future.result())
 
+    router = None
+    if configuration["TCPServer"].get("singlePort", False):
+        services = {imei: server for imei, (server, _) in zip(imei_list, servers_mqtt_services)}
+        router = SinglePortRouter(configuration["TCPServer"]["BasePort"], services)
+        router.start()
+
     logger.info("All Silence Servers and MQTT Services started...")
 
     try:
@@ -64,6 +74,9 @@ def main():
             time.sleep(0.1)
     except KeyboardInterrupt:
         print("KeyboardInterrupt in main, terminating...")
+
+        if router:
+            router.stop()
 
         # Stopping all Server- und MQTT Services
         for server, mqttService in servers_mqtt_services:

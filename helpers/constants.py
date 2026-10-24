@@ -14,5 +14,11 @@ MQTT_STATUS = 'status'
 MQTT_COMMAND = 'command'
 MQTT_RESULT = 'result'
 
+def imei_topic(base, imei):
+    """Internal pub/sub topic scoped to one vehicle. pypubsub topics are
+    process-wide, so with several IMEIs an unscoped topic delivered every
+    command to every vehicle and every status to every MQTT prefix."""
+    return base + "_" + "".join(c if c.isalnum() else "_" for c in str(imei))
+
 # RAW_COMMAND
 RAW_COMMAND_CODE = 'RAW_COMMAND'

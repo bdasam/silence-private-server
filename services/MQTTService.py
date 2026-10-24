@@ -14,7 +14,9 @@ class MQTTService:
         self.port = configuration["MQTTport"]
         self.username = configuration["MQTTuser"]
         self.password = configuration["MQTTpass"]
-        self.password = configuration["MQTTpass"]
+        # Retained status lets a consumer that (re)connects see the last
+        # known values at once instead of waiting for the next frame
+        self.retain_status = configuration.get("RetainStatus", False)
         self.prefix = configuration["TopicPrefix"] + "/" + imei
         self.imei = imei
 
@@ -29,9 +31,9 @@ class MQTTService:
     def disconnect(self):
         self.client.disconnect()
 
-    def publish(self, topic, value):
+    def publish(self, topic, value, retain=False):
         log.debug(f"Publishing on topic [{topic}] value: {value}")
-        self.client.publish(topic, value)
+        self.client.publish(topic, value, retain=retain)
 
     def on_connect(self, client, userdata, flags, rc):
         log.info(f"Connected to broker with result code {rc}")
@@ -52,7 +54,7 @@ class MQTTService:
         cmd = message.topic.replace(self.build_topic(MQTT_COMMAND)+"/", "")
         if len(cmd) > 0:
             try:
-                pub.sendMessage(TOPIC_COMMAND_RECEIVED, command=cmd, payload=message.payload.decode())
+                pub.sendMessage(imei_topic(TOPIC_COMMAND_RECEIVED, self.imei), command=cmd, payload=message.payload.decode())
             except Exception as ex :
                 log.error(f"Invalid command received: {cmd}")
                 self.publish(f"{self.build_topic(MQTT_COMMAND)}/{cmd}/{MQTT_RESULT}", f"Invalid command {cmd}")
@@ -75,10 +77,10 @@ class MQTTService:
             self.client.connect_async(self.broker, self.port, 60)
 
             log.debug(f"Pub/Sub on {TOPIC_SCOOTER_STATUS} for IMEI: {self.imei}")
-            pub.subscribe(self.publish_scooter_status, TOPIC_SCOOTER_STATUS)
+            pub.subscribe(self.publish_scooter_status, imei_topic(TOPIC_SCOOTER_STATUS, self.imei))
 
             log.debug(f"Pub/Sub on {TOPIC_COMMAND_RESULT} for IMEI: {self.imei}")
-            pub.subscribe(self.command_result, TOPIC_COMMAND_RESULT)
+            pub.subscribe(self.command_result, imei_topic(TOPIC_COMMAND_RESULT, self.imei))
 
             self.client.loop_start()
 
@@ -102,10 +104,10 @@ class MQTTService:
                 if scooter_status[parameter]["value"] != None:
                     MQTT_topic = scooter_status[parameter]["MQTT_topic"]
                     value = scooter_status[parameter]["value"]
-                    self.publish(f"{self.build_topic(MQTT_STATUS)}/{MQTT_topic}",value)
+                    self.publish(f"{self.build_topic(MQTT_STATUS)}/{MQTT_topic}",value, self.retain_status)
             except Exception:
                 log.exception(f"Exception in publishing parameter {parameter}")
 
         self.last_status = scooter_status
         self.lastMessageTime = time.time()
-        self.publish(f"{self.build_topic(MQTT_STATUS)}/last-update", self.lastMessageTime)
+        self.publish(f"{self.build_topic(MQTT_STATUS)}/last-update", self.lastMessageTime, self.retain_status)
