@@ -38,5 +38,96 @@
         "command": "$PWON,0\r\n",
         "maxretry": 3,
         "timeout": 300
+    },
+    "S04_STATUS": {
+        "command": "$STMS\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_TEST": {
+        "command": "$TEST\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_IMEI": {
+        "command": "$IMEI\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_SERVER_ADDRESS": {
+        "command": "$IPAD\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_SERVER_PORT": {
+        "command": "$PORT\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_APN": {
+        "command": "$APAD\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_BLEC": {
+        "command": "$BLEC\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_CPWR": {
+        "command": "$CPWR\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_REPL": {
+        "command": "$REPL\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_BATTERY_REPORT": {
+        "command": "$RCAN,184\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_TRANSPORT_MODE": {
+        "command": "$SCAN,31B,0,8,24,0,0,0,0,0,0,0$RCAN,31C\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_LOCATE": {
+        "command": "$FIND,0,19,1,5,1\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_POLL": {
+        "command": "$POLL\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_LOGIN": {
+        "command": "$LOGN\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_MESSAGE": {
+        "command": "$MESG,{text}, 5\r\n",
+        "maxretry": 1,
+        "timeout": 60,
+        "text_param": true
+    },
+    "S04_POWER_ON": {
+        "command": "$PUNL,1$DIAG,1,50$SDIG,2,1\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_POWER_OFF": {
+        "command": "$SDIG,2,0\r\n",
+        "maxretry": 1,
+        "timeout": 60
+    },
+    "S04_REBOOT": {
+        "command": "$BOOT\r\n",
+        "maxretry": 1,
+        "timeout": 60
     }
 }

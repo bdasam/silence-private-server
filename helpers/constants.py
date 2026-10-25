@@ -22,3 +22,7 @@ def imei_topic(base, imei):
 
 # RAW_COMMAND
 RAW_COMMAND_CODE = 'RAW_COMMAND'
+
+# TCU reply text (e.g. "$FIND,OK"), published on MQTT <prefix>/<IMEI>/reply
+TOPIC_COMMAND_REPLY = 'command_reply'
+MQTT_REPLY = 'reply'

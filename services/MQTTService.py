@@ -82,6 +82,8 @@ class MQTTService:
             log.debug(f"Pub/Sub on {TOPIC_COMMAND_RESULT} for IMEI: {self.imei}")
             pub.subscribe(self.command_result, imei_topic(TOPIC_COMMAND_RESULT, self.imei))
 
+            pub.subscribe(self.command_reply, imei_topic(TOPIC_COMMAND_REPLY, self.imei))
+
             self.client.loop_start()
 
         except Exception:
@@ -95,6 +97,10 @@ class MQTTService:
     def command_result(self, command, result):
         log.debug(f"Command {command} result {result}")
         self.publish(f"{self.build_topic(MQTT_COMMAND)}/{command}/{MQTT_RESULT}", result)
+
+    def command_reply(self, reply):
+        # Not retained: a reply belongs to the moment it arrived
+        self.publish(self.build_topic(MQTT_REPLY), reply)
 
     def publish_scooter_status(self, scooter_status):
         log.debug(f"Publishing scooter status: {scooter_status} for IMEI: {self.imei}")

@@ -9,6 +9,7 @@ from _thread import *
 from helpers.constants import *
 from helpers.messageParser import MessageParser
 from helpers.command import Command
+from helpers.reply import reply_text
 
 from services.CommandService import CommandService
 from services.DBService import DBService
@@ -154,7 +155,7 @@ class SilenceServerService(threading.Thread):
             last_BMS_pooling_time = 0
             while 1:    # Communication loop with scooter
                 # See in scooter has data to send
-                messages,crashedFlag = self._telegramReceiver(scooterSocket, 0.2, 0.2, "A", True)
+                messages,crashedFlag = self._telegramReceiver(scooterSocket, 0.2, 0.2, "A", True, textFrames=True)
                 if crashedFlag == 1:
                     log.error("crash socket on communication from scooter")
                     raise Exception("crash socket on communication from scooter")
@@ -165,8 +166,10 @@ class SilenceServerService(threading.Thread):
                         log.info("received status from scooter")
                         if message["protocol"] == "Z":  #only parse protocol Z messages
                             self.parser.parse_message_from_scooter_protocol_Z(data)
-                        elif message["protocol"] == "Astra":
-                            self.parser.parse_message_from_scooter_protocol_astra(data)
+                        elif message["protocol"] in ("Astra", "Text"):
+                            self.publish_reply(data)
+                            if message["protocol"] == "Astra":
+                                self.parser.parse_message_from_scooter_protocol_astra(data)
                         if self.bridgeMode and len(data) > 1:   #hide response ack to silence
                             silenceClientSocket.send(data)
                             log.info("sent to silence")
@@ -260,6 +263,15 @@ class SilenceServerService(threading.Thread):
                     self.connectionCount = max(0, self.connectionCount - 1)
             log.info("closing thread, connected clients: "+str(self.connectionCount))
 
+    def publish_reply(self, data):
+        """The car's text answer ($FIND,OK, TEST:...) to MQTT <prefix>/<IMEI>/reply."""
+        try:
+            text = reply_text(data)
+            if text is not None:
+                pub.sendMessage(imei_topic(TOPIC_COMMAND_REPLY, self.IMEI), reply=text)
+        except Exception:
+            log.exception(f"reply publish failed (IMEI ...{self.IMEI[-4:]})")
+
     def run(self):
 
         if self.serverPORT is None:
@@ -294,7 +306,8 @@ class SilenceServerService(threading.Thread):
                 time.sleep(0.1)
                 s.close()
 
-    def _telegramReceiver(self,scooterSocket,primoTimeout,secondoTimeout,receiverName,firstFrame = False):
+    def _telegramReceiver(self,scooterSocket,primoTimeout,secondoTimeout,receiverName,firstFrame = False, textFrames = False):
+        # textFrames: also accept 'T...\r\n' frames (the S04 "TEST:" reply). Only after login.
 
         def _messageReceived(messages,data,protocol):
             messages.append({"protocol" : protocol , "data" : data})
@@ -325,6 +338,8 @@ class SilenceServerService(threading.Thread):
                 elif int(data[-1]) == 6:    #ACK message
                     _messageReceived(messages,data,"ACK")
                     continue
+                elif int(data[-1]) == 84 and textFrames:  # 'T': S04 "TEST:..." self-test reply, no leading $
+                    protocol = "Text"
                 scooterSocket.settimeout(secondoTimeout)
                 while 1:
                     byte = scooterSocket.recv(1)
@@ -332,7 +347,7 @@ class SilenceServerService(threading.Thread):
                         log.error(f"socket closed by peer (EOF) mid-frame on receiver {receiverName}")
                         return messages,1
                     data += byte
-                    if protocol == "Astra" and int(data[-1]) == 10 and int(data[-2]) == 13: #check for end of message started with $
+                    if protocol in ("Astra", "Text") and int(data[-1]) == 10 and int(data[-2]) == 13: #check for end of message started with $ (or TEST:)
                         _messageReceived(messages,data,protocol)
                         break
                     elif protocol == "Z" and len(data) >= 3 and int.from_bytes(data[1:3], byteorder='big') == len(data):    #check for end of message started with Z
@@ -343,7 +358,7 @@ class SilenceServerService(threading.Thread):
 
             except socket.timeout:
                 if len(data) > 0:
-                    if protocol == "Astra" and len(data) >= 2 and int(data[-1]) == 10 and int(data[-2]) == 13:
+                    if protocol in ("Astra", "Text") and len(data) >= 2 and int(data[-1]) == 10 and int(data[-2]) == 13:
                         # Trame Astra complète arrivée pile au timeout
                         _messageReceived(messages,data,protocol)
                     elif receiverName != "A":

@@ -8,6 +8,7 @@ from queue import Queue
 
 from helpers.constants import *
 from helpers.command import Command
+from helpers.reply import valid_text_arg
 
 log = logging.getLogger(LOGGER_NAME)
 
@@ -73,6 +74,14 @@ class CommandService:
             if command == RAW_COMMAND_CODE:
                 log.info(f"Raw command received: {payload}")
                 command_config = json.loads(payload)
+            elif self.commands_definition[command].get("text_param"):
+                # One validated text argument (S04_MESSAGE), put in place of {text}
+                if not valid_text_arg(payload):
+                    log.error(f"Invalid text for {command}, not queued ({self.IMEI})")
+                    pub.sendMessage(imei_topic(TOPIC_COMMAND_RESULT, self.IMEI), command=command, result="Invalid text")
+                    return
+                command_config = dict(self.commands_definition[command])
+                command_config["command"] = command_config["command"].replace("{text}", payload)
             else:
                 command_config = self.commands_definition[command]
 
